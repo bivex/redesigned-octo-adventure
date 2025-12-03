@@ -1,0 +1,152 @@
+The `perf` report indicates that a significant portion of the execution time is spent within the network stack, specifically related to sending and receiving data for PostgreSQL queries.
+
+The hottest call paths are:
+
+1.  Sending queries: `run_benchmark` -> `reactor_loop_once` -> `reactor_dispatch` -> `reactor_postgres_event` -> `reactor_postgres_read` -> `reactor_dispatch` -> `reactor_postgres_client_dequeue` -> `reactor_postgres_send` -> `PQsendQuery` and its subsequent calls into `__libc_send` and kernel syscalls like `__x64_sys_sendto` and `tcp_sendmsg`. This path accounts for a substantial amount of the time.
+2.  Receiving data: The `net_rx_action`, `process_backlog`, `ip_local_deliver_finish`, `tcp_v4_rcv`, and `tcp_rcv_established` functions in the kernel are also showing high percentages, indicating time spent processing incoming network packets.
+
+This suggests that the primary bottleneck lies in the network I/O operations and the PostgreSQL client's interaction with the database, rather than in the application logic itself. The system is spending a lot of time waiting for or processing network events.
+
+
+## 🚀 **Анализ статьи "IX: A Protected Dataplane Operating System"**
+
+Это **ключевой труд** для масштабирования epoll сервера! Статья описывает архитектуру, которая достигает **высокой производительности** за счет радикального переосмысления OS дизайна.
+
+### **🎯 Основные идеи, применимые к нашему epoll серверу:**
+
+#### **1. Разделение Control Plane vs Dataplane**
+```c
+// Наш текущий код уже частично это делает:
+reactor_construct(); // Control plane (resource allocation)
+reactor_loop_once(); // Dataplane (I/O processing)
+```
+**Что внедрить:** Более четкое разделение ответственности между управлением ресурсами и I/O обработкой.
+
+#### **2. Run-to-Completion архитектура**
+**Ключевой insight:** Пакеты обрабатываются полностью за один проход через стек, без промежуточных буферов.
+
+**Для нашего сервера:**
+```c
+// Вместо: accept -> read -> process -> write (с переключениями)
+// Сделать: accept + read + process + write за один проход
+```
+
+#### **3. Adaptive Batching**
+```c
+// Из статьи: batching только при congestion, с верхним лимитом
+#define BATCH_SIZE_MAX 64  // Как в их экспериментах
+
+// Наш код уже имеет подобное в event loop
+for (size_t i = 0; i < reactor_core.event_count; i++) {
+    // Batch processing всех событий
+}
+```
+
+#### **4. Zero-Copy API**
+**Проблема:** Традиционные сокеты копируют данные многократно
+**Решение:** Прямой доступ к буферам, без копирования
+
+**Для нашего сервера:** Уже частично реализовано с `sendfile()` для static файлов, но можно расширить.
+
+#### **5. Flow-Consistent Hashing**
+**Идея:** NIC распределяет пакеты по очередям так, чтобы один flow всегда шел в одну очередь.
+
+**Преимущества:**
+- Нет синхронизации между cores
+- Лучший cache locality
+- Масштабируемость на много ядер
+
+### **📊 Метрики производительности из статьи:**
+
+| Метрика | IX | Linux | mTCP |
+|---------|----|-------|------|
+| **Односторонняя задержка (64B)** | **5.7μs** | 24μs | - |
+| **Пропускная способность (10GbE)** | **8.8M msg/sec** | 1.2M | 4.7M |
+| **Масштабируемость (ядра)** | **3 cores → line rate** | 8 cores | 8 cores |
+| **Memcached throughput** | **3.6× лучше Linux** | baseline | - |
+
+### **🔧 Конкретные улучшения для нашего epoll сервера:**
+
+#### **1. Улучшить Event Loop (Run-to-Completion)**
+```c
+void reactor_loop_once_optimized(void) {
+    // 1. Accept connections
+    // 2. Read all available data  
+    // 3. Process requests
+    // 4. Send responses
+    // Все за один проход без yield'ов
+}
+```
+
+#### **2. Добавить Adaptive Batching**
+```c
+// Вместо фиксированного batching
+if (has_congestion()) {
+    batch_size = min(BATCH_SIZE_MAX, queue_depth);
+} else {
+    batch_size = 1; // No batching for low latency
+}
+```
+
+#### **3. Zero-Copy Optimizations**
+```c
+// Уже есть для файлов:
+// sendfile() для static content
+
+// Добавить для dynamic:
+// scatter-gather I/O с writev()
+struct iovec iov[2];
+iov[0].iov_base = headers;
+iov[1].iov_base = data;
+writev(sockfd, iov, 2);
+```
+
+#### **4. Multi-Queue NIC Support**
+```c
+// RSS (Receive Side Scaling) configuration
+setsockopt(sockfd, SOL_SOCKET, SO_INCOMING_CPU, &cpu_id, sizeof(cpu_id));
+// Привязать сокет к конкретному CPU для flow affinity
+```
+
+#### **5. Memory Pool Optimization**
+```c
+// Из статьи: per-core memory pools для избежания синхронизации
+typedef struct mem_pool {
+    void *blocks[POOL_SIZE];
+    int free_idx;
+    pthread_mutex_t lock; // Per-pool lock
+} mem_pool;
+```
+
+### **🎪 Почему эта статья идеальна для нашего проекта:**
+
+1. **Современная архитектура** - 2014 год, но идеи актуальны
+2. **Конкретные метрики** - сравнение с Linux и mTCP
+3. **Реализуемые идеи** - можно внедрить без полного переписывания
+4. **Доказанная эффективность** - 3.6× улучшение memcached
+5. **Фокус на latency + throughput** - именно то, что нужно
+
+### **📈 План внедрения:**
+
+**Фаза 1: Базовые улучшения (2-3 дня)**
+- Run-to-completion event loop
+- Adaptive batching в epoll_wait
+- Zero-copy оптимизации
+
+**Фаза 2: Масштабируемость (1 неделя)**  
+- Multi-queue NIC support
+- Per-core memory pools
+- CPU affinity optimizations
+
+**Фаза 3: Тестирование и профилирование**
+- Сравнение latency/throughput
+- Memory usage анализ
+- Scalability benchmarks
+
+### **🎯 Ожидаемые результаты:**
+- **Latency:** Снижение на 30-50% (как в статье)
+- **Throughput:** Увеличение на 2-3× при высокой нагрузке  
+- **Scalability:** Лучшее использование многоядерности
+- **Memory:** Снижение fragmentation и overhead
+
+**Эта статья - "золотой стандарт" для высокопроизводительных сетевых систем!** Она напрямую отвечает на вопрос масштабирования epoll сервера и дает практические рецепты внедрения. 🚀📚

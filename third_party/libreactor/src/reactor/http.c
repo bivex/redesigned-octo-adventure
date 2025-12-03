@@ -1,0 +1,171 @@
+#include <stdio.h>
+#include <string.h>
+
+#include "picohttpparser/picohttpparser.h"
+#include "reactor.h"
+
+/* http field */
+
+http_field http_field_construct(data name, data value)
+{
+  return (http_field) {.name = name, .value = value};
+}
+
+void http_field_push(pointer *pointer, http_field field)
+{
+  pointer_push(pointer, field.name);
+  pointer_push_byte(pointer, ':');
+  pointer_push_byte(pointer, ' ');
+  pointer_push(pointer, field.value);
+  pointer_push_byte(pointer, '\r');
+  pointer_push_byte(pointer, '\n');
+}
+
+data http_field_lookup(http_field *fields, size_t fields_count, data name)
+{
+  size_t i;
+
+  for (i = 0; i < fields_count; i++)
+  {
+    if (data_size(fields[i].name) == data_size(name) &&
+        strncasecmp(data_base(fields[i].name), data_base(name), data_size(name)) == 0)
+      return fields[i].value;
+  }
+  return data_null();
+}
+
+/* http request */
+
+ssize_t http_read_request(stream *stream, data *method, data *target, http_field *fields, size_t *fields_count)
+{
+  return http_read_request_data(data_construct(stream->input.data, stream->input.size), method, target, fields, fields_count);
+}
+
+ssize_t http_read_request_data(data buffer, data *method, data *target, http_field *fields, size_t *fields_count)
+{
+  int n, minor_version;
+
+  //V1027 // Safe cast: http_field and phr_header have identical memory layout
+  n = phr_parse_request(data_base(buffer), data_size(buffer),
+                        (const char **) &method->base, &method->size,
+                        (const char **) &target->base, &target->size,
+                        &minor_version,
+                        (struct phr_header *) fields, fields_count, 0);
+  asm volatile("": : :"memory");
+  return n;
+}
+
+void http_write_request(stream *stream, data method, data target, data host, data type, data body)
+{
+  char storage[16];
+  size_t size;
+  data length;
+  pointer p;
+
+  size = utility_u32_len(data_size(body));
+  utility_u32_sprint(data_size(body), storage + size);
+  length = data_construct(storage, size);
+
+  p = stream_allocate(stream,
+                      data_size(method) + 1 + data_size(target) + 11 +
+                      6 + data_size(host) + 2 +
+                      (data_size(body) ?
+                       14 + data_size(type) + 2 +
+                       16 + data_size(length) + 2 : 0) +
+                      2 +
+                      data_size(body));
+  pointer_push(&p, method);
+  pointer_push_byte(&p, ' ');
+  pointer_push(&p, target);
+  pointer_push(&p, data_string(" HTTP/1.1\r\n"));
+  http_field_push(&p, http_field_construct(data_string("Host"), host));
+  if (data_size(body))
+  {
+    http_field_push(&p, http_field_construct(data_string("Content-Type"), type));
+    http_field_push(&p, http_field_construct(data_string("Content-Length"), length));
+  }
+  pointer_push(&p, data_string("\r\n"));
+  pointer_push(&p, body);
+}
+
+/* http response */
+
+ssize_t http_read_response(stream *stream, int *status_code, data *status, http_field *fields, size_t *fields_count)
+{
+  int n, minor_version;
+
+  //V1027 // Safe cast: http_field and phr_header have identical memory layout
+  n = phr_parse_response(stream->input.data, stream->input.size, &minor_version, status_code,
+                         (const char **) &status->base, &status->size,
+                         (struct phr_header *) fields, fields_count, 0);
+  asm volatile("": : :"memory");
+  return n;
+}
+
+void http_write_response(stream *stream, data status, data date, data type, data body)
+{
+  char storage[16];
+  size_t len_size;
+  size_t body_size = data_size(body);
+  size_t status_size = data_size(status);
+  size_t type_size = data_size(type);
+  pointer p;
+
+  len_size = utility_u32_len(body_size);
+  utility_u32_sprint(body_size, storage + len_size);
+
+  /* Pre-calculate buffer size to avoid multiple reallocations */
+  size_t total_size = 9 + status_size + 2 + 17 + 37 +  /* HTTP/1.1, status, \r\n, Server header */
+                      (data_empty(type) ? 0 : 16 + type_size) +  /* Content-Type header if present */
+                      (18 + len_size) + 2 + body_size;  /* Content-Length header, \r\n, body */
+
+  p = stream_allocate(stream, total_size);
+
+  /* Optimized: direct buffer writes instead of data_string() calls */
+  static const char http_ver[] = "HTTP/1.1 ";
+  static const char crlf[] = "\r\n";
+  static const char server_hdr[] = "Server: reactor\r\n";
+  static const char date_hdr[] = "Date: ";
+  static const char type_hdr[] = "Content-Type: ";
+  static const char length_hdr[] = "Content-Length: ";
+
+  /* HTTP/1.1 Status */
+  memcpy(p, http_ver, sizeof(http_ver) - 1);
+  pointer_move(&p, sizeof(http_ver) - 1);
+  pointer_push(&p, status);
+  memcpy(p, crlf, sizeof(crlf) - 1);
+  pointer_move(&p, sizeof(crlf) - 1);
+
+  /* Server header */
+  memcpy(p, server_hdr, sizeof(server_hdr) - 1);
+  pointer_move(&p, sizeof(server_hdr) - 1);
+
+  /* Date header */
+  memcpy(p, date_hdr, sizeof(date_hdr) - 1);
+  pointer_move(&p, sizeof(date_hdr) - 1);
+  pointer_push(&p, date);
+  memcpy(p, crlf, sizeof(crlf) - 1);
+  pointer_move(&p, sizeof(crlf) - 1);
+
+  /* Content-Type header (if present) */
+  if (!data_empty(type)) {
+    memcpy(p, type_hdr, sizeof(type_hdr) - 1);
+    pointer_move(&p, sizeof(type_hdr) - 1);
+    pointer_push(&p, type);
+    memcpy(p, crlf, sizeof(crlf) - 1);
+    pointer_move(&p, sizeof(crlf) - 1);
+  }
+
+  /* Content-Length header */
+  memcpy(p, length_hdr, sizeof(length_hdr) - 1);
+  pointer_move(&p, sizeof(length_hdr) - 1);
+  memcpy(p, storage, len_size);
+  pointer_move(&p, len_size);
+  memcpy(p, crlf, sizeof(crlf) - 1);
+  pointer_move(&p, sizeof(crlf) - 1);
+
+  /* Empty line and body */
+  memcpy(p, crlf, sizeof(crlf) - 1);
+  pointer_move(&p, sizeof(crlf) - 1);
+  pointer_push(&p, body);
+}

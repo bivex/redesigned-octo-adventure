@@ -1,0 +1,10 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libreactor_postgres
+Description: libreactor PostgreSQL module 
+Version: 0.9.0
+Libs: -L${libdir} -lreactor_postgres
+Cflags: -I${includedir} -flto -fuse-linker-plugin

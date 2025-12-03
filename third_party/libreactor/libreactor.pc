@@ -1,0 +1,10 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libreactor
+Description: High-performance C network library
+Version: 3.0.0
+Libs: -L${libdir} -lreactor
+Cflags: -I${includedir}

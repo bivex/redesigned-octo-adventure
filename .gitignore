@@ -1,0 +1,29 @@
+# Build artifacts
+*.o
+/libreactor
+/libreactor-server
+build/
+perf.data
+perf.data.old
+
+# Temporary files
+*.tmp
+*.log
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Performance profiling
+flamegraph.svg
+*.perf
+
+# Docker
+.dockerignore

@@ -1,0 +1,74 @@
+#ifndef REACTOR_SERVER_H_INCLUDED
+#define REACTOR_SERVER_H_INCLUDED
+
+#include <openssl/ssl.h>
+
+#include "reactor.h"
+
+enum
+{
+  SERVER_REQUEST
+};
+
+enum server_state
+{
+  SERVER_REQUEST_NEED_MORE_DATA,
+  SERVER_REQUEST_READ,
+  SERVER_REQUEST_HANDLING,
+  SERVER_REQUEST_CLOSED
+};
+
+typedef struct server             server;
+typedef struct server_request     server_request;
+
+struct server
+{
+  reactor_handler     handler;
+  int                 is_open;
+  descriptor          descriptor;
+  timer               timer;
+  SSL_CTX            *ssl_ctx;
+  list                requests;
+};
+
+struct server_request
+{
+  size_t              ref;
+  enum server_state   state;
+  int                 event_triggered;
+  reactor_handler     handler;
+  stream              stream;
+  data                data;
+  data                method;
+  data                target;
+  http_field          fields[16];
+  size_t              fields_count;
+  size_t              consumed_bytes;  /* Zero-copy: track consumed bytes without moving buffer */
+  unsigned int        keep_alive : 1; /* Pipeline: continue processing requests on this connection */
+};
+
+void server_construct(server *, reactor_callback *, void *);
+void server_destruct(server *);
+void server_open(server *, int, SSL_CTX *);
+void server_shutdown(server *);
+void server_accept(server *, int);
+
+void server_close(server_request *);
+void server_hold(server_request *);
+void server_release(server_request *);
+void server_respond(server_request *, data, data, data);
+void server_ok(server_request *, data, data);
+void server_not_found(server_request *);
+void server_bad_request(server_request *);
+
+/*
+void server_transaction_ready(server_transaction *);
+void server_transaction_write(server_transaction *, data);
+void server_transaction_ok(server_transaction *, data, data);
+void server_transaction_text(server_transaction *, data);
+void server_transaction_printf(server_transaction *, data, const char *, ...);
+void server_transaction_not_found(server_transaction *);
+void server_transaction_disconnect(server_transaction *);
+*/
+
+#endif /* REACTOR_SERVER_H_INCLUDED */

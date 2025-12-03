@@ -1,0 +1,9 @@
+Version 0.9.1
+=============
+
+Released 2025-07-02
+
+* New features:
+
+  - Rewrite to single file header
+  - zlib license
