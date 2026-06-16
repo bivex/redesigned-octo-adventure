@@ -194,11 +194,45 @@ Our KVM virtualization significantly worsens Docker overhead:
 
 ## 🎯 Performance
 
-### Current Results (Docker, 3 CPUs, KVM)
-- **18k+ req/sec** on plaintext (port 3984)
-- **16k+ req/sec** on JSON responses (port 3984)
+### Verified Results (Lima VM, native build, loopback)
+
+Measured with `wrk` inside an Ubuntu 24.04 aarch64 Lima VM (4 vCPU, kernel 6.8.0-117-generic),
+`libreactor-server` built natively with `-O3 -march=armv8-a -flto`, 4 worker processes
+(one per CPU, `SO_REUSEPORT` + CBPF load balancing). The server listens on **port 3984**
+(see `src/main/libreactor-server.c`).
+
+| Endpoint | Threads / Connections | RPS | Avg latency | Throughput |
+|----------|-----------------------|-----|-------------|------------|
+| `/plaintext` | 4 / 256 | 475,089 | 542 µs | 60 MB/s |
+| `/plaintext` | 4 / 512 | **542,612** | 0.99 ms | 68 MB/s |
+| `/json` | 4 / 256 | 472,561 | 549 µs | 69 MB/s |
+
+Peak throughput is **~540k RPS** on `/plaintext` at 512 connections.
+
+Reproduce from inside the VM:
+
+```bash
+wrk -t4 -c256 -d20s http://127.0.0.1:3984/plaintext  # plaintext
+wrk -t4 -c512 -d20s http://127.0.0.1:3984/plaintext  # plaintext (peak)
+wrk -t4 -c256 -d20s http://127.0.0.1:3984/json       # json
+```
+
+> **Note on host-side numbers.** When benchmarking from the macOS host, the Lima
+> SSH port-forward (`127.0.0.1:3984` → guest) adds tunnel overhead and caps results
+> at ~126k RPS. Always benchmark on the loopback interface where the server runs for
+> true throughput.
+>
+> **Note on routing.** Only `/plaintext` and `/json` are valid routes
+> (see `http_server_parse_route` in `src/domain/http_server.c`). Any other path,
+> including `/`, falls through to `ROUTE_UNKNOWN` and returns the 9-byte `"Not Found"`
+> body with HTTP 200 — so benchmarking `/` measures the not-found path, not plaintext.
+
 - **CPU spent on sendto()** (useful work)
 - **Minimal locks and context switches**
+
+### Historical Results (Docker, 3 CPUs, KVM)
+- **18k+ req/sec** on plaintext (port 3984)
+- **16k+ req/sec** on JSON responses (port 3984)
 
 ### Expected with Full Optimizations (4+ CPUs, bare metal)
 Based on [Extreme HTTP Performance Tuning](https://talawah.io/blog/extreme-http-performance-tuning-one-point-two-million/):
