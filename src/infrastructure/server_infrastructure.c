@@ -169,9 +169,6 @@ server_infra_error_t server_infrastructure_start(server_infrastructure_t *infra)
         /* Signal parent that we're ready */
         worker_manager_signal_ready(&infra->worker_manager);
 
-        /* Start event loop with signal monitoring */
-        log_info("Worker ready, starting event loop");
-
         /* Start event loop - signals will be handled asynchronously */
         log_info("Worker ready, starting event loop");
         reactor_loop();
