@@ -1,58 +1,51 @@
 FROM ubuntu:22.04 AS builder
 
-# Установка зависимостей для сборки
+# Build dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        wget \
-        git \
         make \
+        autoconf \
         automake \
         libtool \
         file \
         gcc \
         g++ \
-        ca-certificates \
+        libssl-dev \
         build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Сборка libdynamic v2.3.0
-RUN wget -q https://github.com/fredrikwidlund/libdynamic/releases/download/v2.3.0/libdynamic-2.3.0.tar.gz && \
-    tar xzf libdynamic-2.3.0.tar.gz && \
-    cd libdynamic-2.3.0 && \
-    ./configure CFLAGS="-O3 -march=x86-64 -mtune=generic -flto -DNDEBUG -fomit-frame-pointer" && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig
-
-# Сборка libclo v1.0.0
-RUN wget -q https://github.com/fredrikwidlund/libclo/releases/download/v1.0.0/libclo-1.0.0.tar.gz && \
-    tar xzf libclo-1.0.0.tar.gz && \
-    cd libclo-1.0.0 && \
-    sed -i '/#include <dynamic.h>/d' ./src/clo.c && \
-    ./configure --prefix=/usr CFLAGS="-O3 -march=x86-64 -mtune=generic -flto -DNDEBUG -fomit-frame-pointer" && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig
-
-# Сборка libreactor v2.0.0-alpha
-RUN git clone https://github.com/fredrikwidlund/libreactor libreactor-2 && \
-    cd libreactor-2 && \
-    git checkout v2.0.0-alpha && \
-    ./autogen.sh && \
-    ./configure CFLAGS="-O3 -march=x86-64 -mtune=generic -flto -DNDEBUG -fomit-frame-pointer" && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig
-
-# Копирование исходников приложения
+# Copy project sources (third_party first so its build is cached separately)
+COPY third_party/ /build/third_party/
 COPY src/ /build/src/
 COPY Makefile /build/Makefile
 
-# Сборка libreactor-server
-RUN make libreactor-server CFLAGS="-O3 -march=x86-64 -mtune=generic -flto -DNDEBUG -fomit-frame-pointer"
+# Build third-party libraries from local sources (explicit steps for visibility)
+# Note: scripts need bash invocation since execute bits may not survive COPY on macOS
+RUN cd third_party/libdynamic && \
+    bash autogen.sh && \
+    bash configure CFLAGS="-O3 -march=x86-64 -mtune=generic -DNDEBUG" && \
+    make -j$(nproc) && \
+    make install && ldconfig
+
+RUN cd third_party/libreactor && \
+    autoreconf -i && \
+    bash configure CFLAGS="-O3 -march=x86-64 -mtune=generic -DNDEBUG" && \
+    make -j$(nproc) && \
+    make install && ldconfig
+
+RUN cd third_party/libclo && \
+    bash autogen.sh && \
+    bash configure --prefix=/usr AR=gcc-ar NM=gcc-nm RANLIB=gcc-ranlib \
+        CFLAGS="-O3 -march=x86-64 -mtune=generic -DNDEBUG -include stdbool.h" && \
+    make -j$(nproc) && \
+    make install && ldconfig
+
+# Build main application
+RUN make libreactor-server \
+    CFLAGS="-O3 -march=x86-64 -mtune=generic -flto -DNDEBUG -fomit-frame-pointer"
 
 # ============================================================================
 # Финальный образ
