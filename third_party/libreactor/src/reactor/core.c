@@ -42,38 +42,7 @@
 
 #define REACTOR_RING_ENTRIES   1024
 /* Per-poll-completion CQE batch upper bound; the CQ is drained fully anyway. */
-#define REACTOR_CQE_BATCH      256
-
-/* ---- CQE user_data tagging ----------------------------------------------- *
- * Every SQE carries a user_data that is recovered from the CQE. To route
- * different op types (POLL vs multishot ACCEPT) we steal the low bit:
- *   0 -> POLL slot pointer
- *   1 -> ACCEPT context pointer
- * All our structs are at least 2-byte aligned, so the low bit is free.
- */
-typedef enum {
-  REACTOR_OP_POLL   = 0,
-  REACTOR_OP_ACCEPT = 1
-} reactor_op_tag;
-
-typedef void (*reactor_accept_fn)(void *user, int fd, int more);
-
-typedef struct {
-  int               listen_fd;
-  void             *user;
-  reactor_accept_fn callback;
-} reactor_accept_ctx;
-
-static inline uintptr_t reactor_tag_encode(reactor_op_tag tag, void *ptr)
-{
-  return (uintptr_t) ptr | (uintptr_t) tag;
-}
-
-static inline reactor_op_tag reactor_tag_decode(uintptr_t data, void **ptr)
-{
-  *ptr = (void *) (data & ~(uintptr_t) 1);
-  return (reactor_op_tag) (data & (uintptr_t) 1);
-}
+#define REACTOR_CQE_BATCH      64
 
 /* ---- per-fd registration table ------------------------------------------- *
  * reactor_add/modify/delete carry a (handler*, fd, events) triple. io_uring
