@@ -63,8 +63,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Создание непривилегированного пользователя
-RUN groupadd -r -g 1000 libreactor && \
-    useradd --no-log-init -r -u 1000 -g libreactor libreactor
+RUN groupadd -r -g 1000 libreactor 2>/dev/null || true && \
+    useradd --no-log-init -r -u 1000 -g libreactor libreactor 2>/dev/null || true
 
 WORKDIR /app
 

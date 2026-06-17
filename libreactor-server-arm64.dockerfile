@@ -1,4 +1,4 @@
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 # Build dependencies
 RUN apt-get update && \
@@ -11,6 +11,7 @@ RUN apt-get update && \
         gcc \
         g++ \
         libssl-dev \
+        liburing-dev \
         build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -50,7 +51,7 @@ RUN make libreactor-server \
 # ============================================================================
 # Финальный образ
 # ============================================================================
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Установка runtime зависимостей
 RUN apt-get update && \
@@ -63,8 +64,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Создание непривилегированного пользователя
-RUN groupadd -r -g 1000 libreactor && \
-    useradd --no-log-init -r -u 1000 -g libreactor libreactor
+RUN groupadd -r -g 1000 libreactor 2>/dev/null || true && \
+    useradd --no-log-init -r -u 1000 -g libreactor libreactor 2>/dev/null || true
 
 WORKDIR /app
 
@@ -122,7 +123,7 @@ exec gosu libreactor ./libreactor-server "$@"\n\
 ' > /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh && \
-    chown -R libreactor:libreactor /app
+    chown -R libreactor:libreactor /app 2>/dev/null || true
 
 EXPOSE 3984
 

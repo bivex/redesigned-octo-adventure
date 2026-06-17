@@ -6,6 +6,18 @@ build/
 perf.data
 perf.data.old
 
+# Autotools build artifacts (generated in third_party/libreactor)
+*.lo
+*.Plo
+*.Tpo
+*.Po
+*.lai
+.dirstamp
+.deps/
+.libs/
+*.la
+*.a
+
 # Temporary files
 *.tmp
 *.log
