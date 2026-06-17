@@ -63,6 +63,8 @@ lib_LTLIBRARIES 		= libreactor.la
 libreactor_la_SOURCES 		= $(SOURCE_FILES) $(HEADER_FILES)
 libreactor_la_CFLAGS		= -std=gnu2x -g -O3 -flto -march=native -I$(srcdir)/src -fPIC
 libreactor_la_LDFLAGS		= -static
+# io_uring backend (liburing)
+libreactor_la_LIBADD		= -luring
 
 headerfilesdir 			= $(includedir)/reactor
 headerfiles_HEADERS 		= $(HEADER_FILES)

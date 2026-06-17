@@ -9,7 +9,7 @@ CC       = gcc
 # -funroll-loops: Loop unrolling
 CFLAGS   = -std=gnu2x -Wall -Wextra -Wpedantic -O3 -g -march=native -flto -fno-omit-frame-pointer -ffast-math -funroll-loops -MMD -MP
 CPPFLAGS = -Isrc/include -Isrc/include/platform -Isrc/include/domain -Isrc/include/infrastructure -Ithird_party/libreactor/src -Ithird_party/libdynamic
-LDADD    = third_party/libreactor/.libs/libreactor.a third_party/libclo/.libs/libclo.a -lssl -lcrypto -ldl
+LDADD    = third_party/libreactor/.libs/libreactor.a third_party/libclo/.libs/libclo.a -lssl -lcrypto -ldl -luring
 
 # Build directory
 BUILD_DIR = build

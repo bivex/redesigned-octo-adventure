@@ -194,66 +194,75 @@ Our KVM virtualization significantly worsens Docker overhead:
 
 ## 🎯 Performance
 
-### Verified Results (Lima VM, native build, loopback)
+### Verified Results — io_uring backend (current)
 
-Measured with `wrk` inside an Ubuntu 24.04 aarch64 Lima VM running on the Apple
-Virtualization Framework (4 vCPU, kernel 6.8.0-117-generic), `libreactor-server`
-built natively with `-O3 -march=armv8-a -flto`, 4 worker processes (one per CPU,
-`SO_REUSEPORT` + CBPF load balancing). The server listens on **port 3984**
+The reactor event loop runs on **io_uring** (liburing), replacing epoll. Measured
+with `wrk` inside an Ubuntu 24.04 aarch64 Lima VM on the Apple Virtualization
+Framework (4 vCPU, kernel 6.8.0-117-generic), `libreactor-server` built natively
+with `-O3 -march=armv8-a -flto`, 4 worker processes (one per CPU, `SO_REUSEPORT`
++ CBPF load balancing). The server listens on **port 3984**
 (see `src/main/libreactor-server.c`).
 
-| Endpoint | Threads / Connections | RPS | Avg latency | Throughput |
-|----------|-----------------------|-----|-------------|------------|
-| `/plaintext` | 4 / 512 | **~400,000** | 1.24 ms | ~50 MB/s |
-| `/plaintext` | 4 / 128 | ~390,000 | 0.46 ms | ~50 MB/s |
-| `/json` | 4 / 256 | ~340,000 | 0.55 ms | ~49 MB/s |
+| Endpoint | Threads / Connections | RPS | Avg latency | vs epoll |
+|----------|-----------------------|-----|-------------|----------|
+| `/plaintext` | 4 / 128 | **~800,000** | 0.15–0.27 ms | **+100%** |
+| `/json` | 4 / 256 | **~830,000** | ~0.3 ms | **+144%** |
 
-These are 30-second runs, median of 3. Numbers are the stable plateau; the Apple
-vz hypervisor introduces significant run-to-run variance (single runs spike to
-~750k RPS), so report medians rather than peaks.
+30-second runs, median of 3. The Apple vz hypervisor still adds run-to-run
+variance; medians are reported.
 
 Reproduce from inside the VM:
 
 ```bash
-wrk -t4 -c512 -d30s http://127.0.0.1:3984/plaintext  # plaintext
+wrk -t4 -c128 -d30s http://127.0.0.1:3984/plaintext  # plaintext
 wrk -t4 -c256 -d30s http://127.0.0.1:3984/json       # json
 ```
 
 > **Note on host-side numbers.** When benchmarking from the macOS host, the Lima
 > SSH port-forward (`127.0.0.1:3984` → guest) adds tunnel overhead and caps results
-> at ~126k RPS. Always benchmark on the loopback interface where the server runs for
-> true throughput.
+> far below the loopback numbers. Always benchmark on the loopback interface where
+> the server runs for true throughput.
 >
 > **Note on routing.** Only `/plaintext` and `/json` are valid routes
 > (see `http_server_parse_route` in `src/domain/http_server.c`). Any other path,
 > including `/`, falls through to `ROUTE_UNKNOWN` and returns the 9-byte `"Not Found"`
 > body with HTTP 200 — so benchmarking `/` measures the not-found path, not plaintext.
 
-### ⚡ Reactor epoll timeout (busy-poll vs blocking)
+### ⚡ io_uring backend
 
-The reactor event loop previously used a **1 ms busy-poll** `epoll_wait` timeout
-(`REACTOR_DEFAULT_TIMEOUT_MS = 1` in `third_party/libreactor/src/reactor/core.c`).
-This is an intentional "run-to-completion" design, but it kept all worker processes
-at **~0% idle / ~70% sys CPU even with zero load** — each worker spinning through
-~1000 `epoll_wait` syscalls per second.
+The reactor core (`third_party/libreactor/src/reactor/core.c`) and descriptor
+layer (`descriptor.c`) were ported from epoll to a liburing ring. fd readiness is
+delivered via `IORING_OP_POLL_ADD` completions (one-shot, re-armed per event);
+the higher layers (`stream.c`, `server.c`) still issue `read()`/`send()` on
+readiness, but submissions are batched through the ring.
 
-The default is now **-1** (block until an event arrives), the standard for event-loop
-servers. Measured A/B on `/plaintext` (loopback, 5-run medians):
+`strace -c` under load shows why this alone roughly doubled throughput: the
+per-event `epoll_wait` + `epoll_ctl` syscall storm collapses into a handful of
+batched `io_uring_enter` calls (~2k/sec vs one syscall per event before).
 
-| Concurrency | 1 ms busy-poll | -1 blocking | Δ |
-|-------------|---------------|-------------|---|
-| 2t / 64c    | 176,797 | **306,493** | **+73%** |
-| 4t / 128c   | 325,311 | **389,792** | +20% |
-| 4t / 256c   | 391,350 | 389,230 | ~0% |
-| 4t / 512c   | 423,310 | 431,643 | +2% |
-| **idle CPU**| **0%** | **~100%** | — |
+| Syscall (per worker, ~890k aggregate RPS) | calls/sec | % time |
+|-------------------------------------------|-----------|--------|
+| `sendto` | ~68,000 | 68% |
+| `read` | ~68,000 | 28% |
+| `io_uring_enter` | ~2,100 | 4% |
 
-Blocking is equal or better at every point and far better on low concurrency, while
-consuming ~0% CPU at idle. The API `reactor_set_timeout(ms)` remains available for
-callers that want busy-poll behaviour.
+The remaining `read`/`sendto` (96% of time) are the synchronous I/O in `stream.c`;
+moving them to io_uring completion ops (`IORING_OP_RECV`/`SEND`) is the next
+planned optimization. Idle CPU stays ~100% (no busy-poll regression).
 
 - **CPU spent on sendto()** (useful work)
 - **Minimal locks and context switches**
+
+### Previous backend: epoll (history)
+
+Before io_uring, the reactor used epoll. Two fixes were applied there first:
+
+1. **epoll timeout busy-poll → blocking** — the loop previously used a 1 ms
+   `epoll_wait` timeout (intentional "run-to-completion"), which pinned workers
+   at ~0% idle / ~70% sys CPU with zero load. Switched to `-1` (block until
+   event): ~100% idle at rest, +73% RPS at low concurrency. The
+   `reactor_set_timeout(ms)` API is retained for callers wanting busy-poll.
+2. That epoll backend peaked at **~400k RPS** (`/plaintext`), ~340k (`/json`).
 
 ### Historical Results (Docker, 3 CPUs, KVM)
 - **18k+ req/sec** on plaintext (port 3984)

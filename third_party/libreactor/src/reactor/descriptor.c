@@ -1,33 +1,51 @@
+/*
+ * descriptor — io_uring backend
+ *
+ * Wraps an fd registered with the reactor ring via IORING_OP_POLL_ADD. Unlike
+ * epoll, io_uring polls are one-shot: each completion must be re-armed
+ * (reactor_poll_resubmit) for the next ready event to be delivered. That
+ * re-arm happens here after dispatch so behaviour matches the old level/edge
+ * epoll contract from the consumer's perspective.
+ */
 #include <stdio.h>
 #include <unistd.h>
-#include <sys/epoll.h>
+#include <poll.h>
 #include <assert.h>
 
 #include "reactor.h"
 #include "descriptor.h"
 
+/* Internal core hooks (defined in core.c, not part of public core.h). */
+struct io_uring *reactor_ring(void);
+void reactor_poll_resubmit(int fd);
+void reactor_submit(void);
+
 static uint32_t descriptor_events(descriptor *descriptor)
 {
+  /* EPOLLIN/POLLOUT values are identical on Linux; POLL_ADD accepts them. */
   return
-    EPOLLHUP |
-    EPOLLRDHUP |
-    (descriptor->mask & DESCRIPTOR_READ ? EPOLLIN : 0) |
-    (descriptor->mask & DESCRIPTOR_WRITE ? EPOLLOUT : 0) |
-    (descriptor->mask & DESCRIPTOR_LEVEL ? 0 : EPOLLET);
+    (descriptor->mask & DESCRIPTOR_READ ? POLLIN : 0) |
+    (descriptor->mask & DESCRIPTOR_WRITE ? POLLOUT : 0);
 }
 
 static void descriptor_callback(reactor_event *event)
 {
   descriptor *descriptor = event->state;
-  struct epoll_event *e = (struct epoll_event *) event->data;
+  /* event->data is the poll mask delivered by the io_uring POLL CQE (cqe->res). */
+  uint32_t mask = (uint32_t) event->data;
 
   assert(event->type == REACTOR_EPOLL_EVENT);
-  if (e->events & EPOLLIN)
+
+  if (mask & POLLIN)
     reactor_dispatch(&descriptor->handler, DESCRIPTOR_READ, 0);
-  if (e->events & EPOLLOUT)
+  if (mask & POLLOUT)
     reactor_dispatch(&descriptor->handler, DESCRIPTOR_WRITE, 0);
-  if (e->events & ~(EPOLLIN | EPOLLOUT))
+  if (mask & ~(POLLIN | POLLOUT))
     reactor_dispatch(&descriptor->handler, DESCRIPTOR_CLOSE, 0);
+
+  /* Re-arm: io_uring POLL_ADD is one-shot per submission. */
+  if (descriptor->fd >= 0)
+    reactor_poll_resubmit(descriptor->fd);
 }
 
 void descriptor_construct(descriptor *descriptor, reactor_callback *callback, void *state)
@@ -59,17 +77,13 @@ void descriptor_mask(descriptor *descriptor, enum descriptor_mask mask)
   reactor_modify(&descriptor->epoll_handler, descriptor->fd, descriptor_events(descriptor));
 }
 
-
 void descriptor_close(descriptor *descriptor)
 {
-  int e;
-
   if (!descriptor_is_open(descriptor))
     return;
 
   reactor_delete(&descriptor->epoll_handler, descriptor->fd);
-  e = close(descriptor->fd);
-  assert(e == 0);
+  close(descriptor->fd);
   descriptor->fd = -1;
   descriptor->mask = 0;
 }
