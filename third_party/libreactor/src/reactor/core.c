@@ -166,8 +166,14 @@ void reactor_construct(void)
   reactor_core.descriptors = 0;
   reactor_core.time = 0;
 
-  if (io_uring_queue_init(REACTOR_RING_ENTRIES, &reactor_core.ring, 0) < 0)
-    abort();
+  if (io_uring_queue_init(REACTOR_RING_ENTRIES, &reactor_core.ring,
+                          IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER) < 0)
+  {
+    /* DEFER_TASKRUN needs SINGLE_ISSUER and kernel >= 6.1. Fall back to a plain
+     * ring if unsupported (older kernels / some sandboxes). */
+    if (io_uring_queue_init(REACTOR_RING_ENTRIES, &reactor_core.ring, 0) < 0)
+      abort();
+  }
 
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);

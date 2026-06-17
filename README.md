@@ -205,11 +205,12 @@ with `-O3 -march=armv8-a -flto`, 4 worker processes (one per CPU, `SO_REUSEPORT`
 
 | Endpoint | Threads / Connections | RPS | Avg latency | vs epoll |
 |----------|-----------------------|-----|-------------|----------|
-| `/plaintext` | 4 / 128 | **~800,000** | 0.15–0.27 ms | **+100%** |
-| `/json` | 4 / 256 | **~830,000** | ~0.3 ms | **+144%** |
+| `/plaintext` | 4 / 128 | **~900,000–1,070,000** | 0.11–0.27 ms | **+125–165%** |
+| `/json` | 4 / 256 | **~750,000–830,000** | ~0.3 ms | **+120–144%** |
 
-30-second runs, median of 3. The Apple vz hypervisor still adds run-to-run
-variance; medians are reported.
+30-second runs report medians (~900k plaintext); 8-second sweeps peak near
+1.07M RPS at 4 threads / 128 connections. The Apple vz hypervisor adds
+run-to-run variance, so medians are reported for the 30s numbers.
 
 Reproduce from inside the VM:
 
@@ -234,21 +235,41 @@ The reactor core (`third_party/libreactor/src/reactor/core.c`) and descriptor
 layer (`descriptor.c`) were ported from epoll to a liburing ring. fd readiness is
 delivered via `IORING_OP_POLL_ADD` completions (one-shot, re-armed per event);
 the higher layers (`stream.c`, `server.c`) still issue `read()`/`send()` on
-readiness, but submissions are batched through the ring.
+readiness. This "poll + psync I/O" hybrid is the recommended design for sockets
+at I/O depth 1 (see the liburing io_uring-vs-epoll analysis: io_uring wins for
+ping-pong, and psync read/write beats completion ops when data is already in the
+network buffer).
 
-`strace -c` under load shows why this alone roughly doubled throughput: the
-per-event `epoll_wait` + `epoll_ctl` syscall storm collapses into a handful of
-batched `io_uring_enter` calls (~2k/sec vs one syscall per event before).
+`strace -c` under load shows why replacing epoll roughly doubled throughput: the
+per-event `epoll_wait` + `epoll_ctl` syscall storm collapses into batched
+`io_uring_enter` calls.
 
-| Syscall (per worker, ~890k aggregate RPS) | calls/sec | % time |
+**Ring setup flags:** the ring is created with `IORING_SETUP_DEFER_TASKRUN |
+IORING_SETUP_SINGLE_ISSUER` (kernel 6.1+; we fall back to a plain ring on older
+kernels). `DEFER_TASKRUN` defers task_work to `io_uring_enter` time in the owning
+thread, cutting scheduler overhead — per the io_uring maintainer this alone is a
+~+18–37% RPS class effect. `SINGLE_ISSUER` is safe here because each worker
+thread drives its own ring and only that thread submits (async/thread-pool paths
+write to an eventfd, never to the ring). Measured A/B on `/plaintext`,
+5-run medians:
+
+| Concurrency | io_uring (plain) | + DEFER_TASKRUN | Δ |
+|-------------|------------------|-----------------|---|
+| 2t / 64c    | 636k | **872k** | +37% |
+| 4t / 128c   | 902k | **1,068k** | +18% |
+| 4t / 256c   | 851k | **1,034k** | +22% |
+| 4t / 512c   | 795k | **969k** | +22% |
+
+| Syscall (per worker, ~900k aggregate RPS) | calls/sec | % time |
 |-------------------------------------------|-----------|--------|
-| `sendto` | ~68,000 | 68% |
-| `read` | ~68,000 | 28% |
-| `io_uring_enter` | ~2,100 | 4% |
+| `sendto` | ~18,000 | 59% |
+| `read` | ~18,000 | 24% |
+| `io_uring_enter` | ~6,700 | 17% |
 
-The remaining `read`/`sendto` (96% of time) are the synchronous I/O in `stream.c`;
-moving them to io_uring completion ops (`IORING_OP_RECV`/`SEND`) is the next
-planned optimization. Idle CPU stays ~100% (no busy-poll regression).
+The remaining `read`/`sendto` (~83%) are the synchronous I/O in `stream.c`. The
+io_uring-vs-epoll analysis predicts completion ops would not help (and may
+regress) for depth-1 sockets, so this is left as the hybrid design rather than a
+full recv/send completion port. Idle CPU stays ~100% (no busy-poll regression).
 
 - **CPU spent on sendto()** (useful work)
 - **Minimal locks and context switches**
