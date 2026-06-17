@@ -316,6 +316,36 @@ Lima instance (no `/dev/kvm`, no cpufreq governor, no control over the guest ker
 command line). The single change that moved the needle in this environment was the
 in-process epoll-timeout fix above, not kernel tuning.
 
+### 🖥️ System tuning (Ubuntu guest)
+Out of the box Ubuntu ships with small socket buffers and backlogs that cap
+high-concurrency throughput. `tune_system.sh` applies the validated sysctl set
+(run as root inside the VM, or copy to `/etc/sysctl.d/99-libreactor.conf`):
+
+- Socket buffers: `rmem_max`/`wmem_max` 16 MB, `tcp_rmem`/`tcp_wmem` up to 16 MB
+- Listen backlog: `somaxconn=32768` (the server calls `listen(fd, INT_MAX)`,
+  the kernel clamps to this), `tcp_max_syn_backlog=32768`, `netdev_max_backlog=250000`
+- `tcp_fastopen=3` (client + server), `tcp_tw_reuse=2`
+
+A/B-measured effect on `/plaintext` (loopback, 4 vCPU):
+
+| Concurrency | default Ubuntu | + sysctl tuning | Δ |
+|-------------|----------------|-----------------|---|
+| 2t / 64c    | 859k | 861k | ~0% |
+| 4t / 128c   | 1,016k | 1,015k | ~0% |
+| 4t / 256c   | 1,032k | **1,089k** | **+5.5%** |
+| 4t / 512c   | 1,012k | **1,088k** | **+7.5%** |
+
+The win is concentrated at high concurrency (256+ connections), where the larger
+buffers/backlog stop being the limit. At low concurrency the workload is
+syscall-bound, not buffer-bound, so sysctl changes are in the noise.
+
+> **Conntrack bypass (NOTRACK for lo) — do NOT apply here.** Bypassing
+> connection tracking for the loopback interface is a commonly recommended
+> tuning, but A/B on this setup *regressed hard* at high concurrency (4t/256c:
+> 1089k → 528k RPS with high variance). It is intentionally excluded from
+> `tune_system.sh`. Loopback-specific quirks in the Apple vz net stack are the
+> likely cause.
+
 ## 🔧 API
 
 ### Endpoints
