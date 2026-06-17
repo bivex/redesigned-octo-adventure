@@ -346,6 +346,50 @@ syscall-bound, not buffer-bound, so sysctl changes are in the noise.
 > `tune_system.sh`. Loopback-specific quirks in the Apple vz net stack are the
 > likely cause.
 
+### 🧪 TechEmpower-equivalent methodology (self-reported)
+
+The official [TechEmpower Framework Benchmarks](https://www.techempower.com/benchmarks/)
+were **archived in March 2026** (Round 23 was the final round, on dedicated
+40 Gb enterprise hardware). New submissions are no longer accepted, so this is
+**not an official TechEmpower result** — it is the same methodology run locally,
+self-reported, for comparison only.
+
+The responses are byte-exact to the TechEmpower spec — verified:
+
+| Endpoint | Body | Bytes | Content-Type |
+|----------|------|-------|--------------|
+| `/plaintext` | `Hello, World!` | 13 | `text/plain` |
+| `/json` | `{"message":"Hello, World!"}` | 27 | `application/json` |
+
+Using the TechEmpower parameters (512 connections, 15 s runs, plaintext at
+pipeline depth 16, JSON unpipelined) on the 4-vCPU Lima vz VM:
+
+| Test | TechEmpower params | Median RPS | min–max (7 runs) |
+|------|--------------------|-----------|------------------|
+| **plaintext** (pipeline=16) | `-c 512 -d 15`, 16-deep pipeline | **~7,700,000** | 6.59M – 7.79M |
+| **json** (unpipelined) | `-c 512 -d 15` | **~1,045,000** | 904k – 1.12M |
+
+Reproduce:
+
+```bash
+# plaintext (pipeline depth 16, TechEmpower-style)
+wrk -s bench/techempower_plaintext_pipeline16.lua -c 512 -t 4 -d 15 \
+    http://127.0.0.1:3984/plaintext
+
+# json (unpipelined)
+wrk -c 512 -t 4 -d 15 -H "Accept: application/json" http://127.0.0.1:3984/json
+```
+
+> **Hardware caveat — not apples-to-apples with Round 23.** Round 23's top
+> C/C++ frameworks (ulib, drogon, h2o) score 7–9M plaintext RPS on 40 Gb NICs
+> with fiber and many-core enterprise CPUs. These numbers are measured on a
+> 4-vCPU Apple Virtualization Framework VM over **loopback**, so they reflect
+> the in-process event loop and TCP loopback stack, not real-network throughput.
+> They place libreactor in the same *performance class* as the top of the
+> Round 23 table, but a direct numeric comparison would be misleading. The
+> non-pipelined json number (~1.05M) is the more honest measure of per-request
+> cost; the 7.7M plaintext number is dominated by pipeline amplification.
+
 ## 🔧 API
 
 ### Endpoints
