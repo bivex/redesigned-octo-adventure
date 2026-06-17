@@ -21,7 +21,7 @@
 #include "descriptor.h" /* Added for descriptor_mask enum */
 
 #define REACTOR_MAX_EVENTS 8192  /* Increased from 1024 to reduce epoll_wait calls and do_epoll_ctl overhead (0.189s) */
-#define REACTOR_DEFAULT_TIMEOUT_MS 1  /* Default epoll timeout - prevents blocking when work is available */
+#define REACTOR_DEFAULT_TIMEOUT_MS -1  /* Default epoll timeout: -1 = block until event (idle-CPU ~0%; was 1ms busy-poll) */
 #define REACTOR_TIMESLOT 5  /* Timer check interval in seconds */
 #define REACTOR_MAX_BATCH_SIZE 64  /* Max batch size for adaptive batching (IX paper) */
 #define REACTOR_MEM_POOL_SIZE 1024  /* Size of per-core memory pools */

@@ -196,25 +196,27 @@ Our KVM virtualization significantly worsens Docker overhead:
 
 ### Verified Results (Lima VM, native build, loopback)
 
-Measured with `wrk` inside an Ubuntu 24.04 aarch64 Lima VM (4 vCPU, kernel 6.8.0-117-generic),
-`libreactor-server` built natively with `-O3 -march=armv8-a -flto`, 4 worker processes
-(one per CPU, `SO_REUSEPORT` + CBPF load balancing). The server listens on **port 3984**
+Measured with `wrk` inside an Ubuntu 24.04 aarch64 Lima VM running on the Apple
+Virtualization Framework (4 vCPU, kernel 6.8.0-117-generic), `libreactor-server`
+built natively with `-O3 -march=armv8-a -flto`, 4 worker processes (one per CPU,
+`SO_REUSEPORT` + CBPF load balancing). The server listens on **port 3984**
 (see `src/main/libreactor-server.c`).
 
 | Endpoint | Threads / Connections | RPS | Avg latency | Throughput |
 |----------|-----------------------|-----|-------------|------------|
-| `/plaintext` | 4 / 256 | 475,089 | 542 µs | 60 MB/s |
-| `/plaintext` | 4 / 512 | **542,612** | 0.99 ms | 68 MB/s |
-| `/json` | 4 / 256 | 472,561 | 549 µs | 69 MB/s |
+| `/plaintext` | 4 / 512 | **~400,000** | 1.24 ms | ~50 MB/s |
+| `/plaintext` | 4 / 128 | ~390,000 | 0.46 ms | ~50 MB/s |
+| `/json` | 4 / 256 | ~340,000 | 0.55 ms | ~49 MB/s |
 
-Peak throughput is **~540k RPS** on `/plaintext` at 512 connections.
+These are 30-second runs, median of 3. Numbers are the stable plateau; the Apple
+vz hypervisor introduces significant run-to-run variance (single runs spike to
+~750k RPS), so report medians rather than peaks.
 
 Reproduce from inside the VM:
 
 ```bash
-wrk -t4 -c256 -d20s http://127.0.0.1:3984/plaintext  # plaintext
-wrk -t4 -c512 -d20s http://127.0.0.1:3984/plaintext  # plaintext (peak)
-wrk -t4 -c256 -d20s http://127.0.0.1:3984/json       # json
+wrk -t4 -c512 -d30s http://127.0.0.1:3984/plaintext  # plaintext
+wrk -t4 -c256 -d30s http://127.0.0.1:3984/json       # json
 ```
 
 > **Note on host-side numbers.** When benchmarking from the macOS host, the Lima
@@ -226,6 +228,29 @@ wrk -t4 -c256 -d20s http://127.0.0.1:3984/json       # json
 > (see `http_server_parse_route` in `src/domain/http_server.c`). Any other path,
 > including `/`, falls through to `ROUTE_UNKNOWN` and returns the 9-byte `"Not Found"`
 > body with HTTP 200 — so benchmarking `/` measures the not-found path, not plaintext.
+
+### ⚡ Reactor epoll timeout (busy-poll vs blocking)
+
+The reactor event loop previously used a **1 ms busy-poll** `epoll_wait` timeout
+(`REACTOR_DEFAULT_TIMEOUT_MS = 1` in `third_party/libreactor/src/reactor/core.c`).
+This is an intentional "run-to-completion" design, but it kept all worker processes
+at **~0% idle / ~70% sys CPU even with zero load** — each worker spinning through
+~1000 `epoll_wait` syscalls per second.
+
+The default is now **-1** (block until an event arrives), the standard for event-loop
+servers. Measured A/B on `/plaintext` (loopback, 5-run medians):
+
+| Concurrency | 1 ms busy-poll | -1 blocking | Δ |
+|-------------|---------------|-------------|---|
+| 2t / 64c    | 176,797 | **306,493** | **+73%** |
+| 4t / 128c   | 325,311 | **389,792** | +20% |
+| 4t / 256c   | 391,350 | 389,230 | ~0% |
+| 4t / 512c   | 423,310 | 431,643 | +2% |
+| **idle CPU**| **0%** | **~100%** | — |
+
+Blocking is equal or better at every point and far better on low concurrency, while
+consuming ~0% CPU at idle. The API `reactor_set_timeout(ms)` remains available for
+callers that want busy-poll behaviour.
 
 - **CPU spent on sendto()** (useful work)
 - **Minimal locks and context switches**
@@ -240,6 +265,13 @@ Based on [Extreme HTTP Performance Tuning](https://talawah.io/blog/extreme-http-
 - **Latency**: sub-millisecond p99
 - **CPU utilization**: 100% on useful work
 - **Scaling**: linear with CPU cores
+
+### Why kerneldev MCP is not used here
+The `kerneldev-mcp` tool builds and boots a *custom* kernel in a separate
+virtme-ng/QEMU VM; it cannot reconfigure the kernel of an already-running Apple vz
+Lima instance (no `/dev/kvm`, no cpufreq governor, no control over the guest kernel
+command line). The single change that moved the needle in this environment was the
+in-process epoll-timeout fix above, not kernel tuning.
 
 ## 🔧 API
 
