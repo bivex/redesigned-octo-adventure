@@ -2,6 +2,19 @@
 
 Optimized HTTP server based on libreactor with extreme performance.
 
+> ## ⚡ Current measured throughput (io_uring backend)
+>
+> | Endpoint | RPS | Latency | Environment |
+> |----------|-----|---------|-------------|
+> | `/plaintext` | **~1,000,000 – 1,070,000** | 0.11–0.27 ms | 4 vCPU, loopback |
+> | `/json` | **~750,000 – 830,000** | ~0.3 ms | 4 vCPU, loopback |
+>
+> Measured with `wrk` in an Ubuntu 24.04 aarch64 Lima VM (Apple Virtualization
+> Framework, kernel 6.8) on 4 vCPU, 4 worker processes (one per CPU,
+> `SO_REUSEPORT` + CBPF), io_uring reactor with `DEFER_TASKRUN`. Idle CPU ~100%.
+> See [Performance](#-performance) for full methodology and the path from the
+> original ~400k RPS epoll baseline (~+150%).
+
 Updated by 2025 year. 
 
 Tested on Contabo 3vcpu 8gb ram, Debian11
