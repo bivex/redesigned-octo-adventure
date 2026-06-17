@@ -26,7 +26,10 @@ static size_t stream_socket_read(stream *stream)
   do
   {
     buffer_reserve(&stream->input, buffer_size(&stream->input) + read_size);
-    n = read(descriptor_fd(&stream->descriptor), (uint8_t *) buffer_data(&stream->input) + buffer_size(&stream->input), read_size);
+    /* recv() with MSG_DONTWAIT: same data as read() on a socket, but takes the
+     * networking fast-path directly and makes the non-blocking intent explicit
+     * (fd is already non-blocking via accept4 SOCK_NONBLOCK). */
+    n = recv(descriptor_fd(&stream->descriptor), (uint8_t *) buffer_data(&stream->input) + buffer_size(&stream->input), read_size, MSG_DONTWAIT);
     if (reactor_unlikely(n == -1))
       break;
     total += n;

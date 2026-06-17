@@ -6,14 +6,14 @@ Optimized HTTP server based on libreactor with extreme performance.
 >
 > | Endpoint | RPS | Latency | Environment |
 > |----------|-----|---------|-------------|
-> | `/plaintext` | **~1,000,000 – 1,070,000** | 0.11–0.27 ms | 4 vCPU, loopback |
-> | `/json` | **~750,000 – 830,000** | ~0.3 ms | 4 vCPU, loopback |
+> | `/plaintext` | **~1,100,000 – 1,130,000** | 0.09–0.23 ms | 4 vCPU, loopback |
+> | `/json` | **~1,040,000 – 1,140,000** | ~0.2 ms | 4 vCPU, loopback |
 >
 > Measured with `wrk` in an Ubuntu 24.04 aarch64 Lima VM (Apple Virtualization
 > Framework, kernel 6.8) on 4 vCPU, 4 worker processes (one per CPU,
 > `SO_REUSEPORT` + CBPF), io_uring reactor with `DEFER_TASKRUN`. Idle CPU ~100%.
 > See [Performance](#-performance) for full methodology and the path from the
-> original ~400k RPS epoll baseline (~+150%).
+> original ~400k RPS epoll baseline (~+180%).
 
 Updated by 2025 year. 
 
