@@ -46,19 +46,20 @@
 
 /* ---- per-fd registration table ------------------------------------------- *
  * reactor_add/modify/delete carry a (handler*, fd, events) triple. io_uring
- * POLL_ADD keys a completion by user_data only, so we stash the handler in
- * user_data and keep a side table so modify/delete can cancel outstanding
- * polls by fd. The table is thread-local (one reactor per worker thread,
- * matching the old __thread reactor_core).
+ * POLL_ADD keys a completion by user_data only, so we stash a back-pointer to
+ * the slot in user_data and keep an fd-indexed table for O(1) lookup.
+ *
+ * File descriptors on Linux are small non-negative integers bounded by the
+ * file rlimit, so a direct fd->slot map is both simplest and fastest. The
+ * table is thread-local (one reactor per worker thread).
  */
 typedef struct {
   reactor_handler *handler;
-  int              fd;
   uint32_t         events;        /* POLLIN/POLLOUT mask currently submitted */
   int              in_flight;     /* outstanding POLL_ADD SQEs for this slot */
 } reactor_poll_slot;
 
-#define REACTOR_POLL_TABLE_SIZE 4096
+#define REACTOR_MAX_FDS 65536
 
 typedef struct reactor
 {
@@ -66,7 +67,10 @@ typedef struct reactor
   int               active;
   size_t            descriptors;
   uint64_t          time;
-  reactor_poll_slot table[REACTOR_POLL_TABLE_SIZE];
+  reactor_poll_slot *fds[REACTOR_MAX_FDS];   /* fd -> slot (NULL if free)     */
+  reactor_poll_slot *slots;                  /* pool of slot structs          */
+  size_t            slot_count;
+  size_t            next_free_slot;          /* hint for O(1) slot acquisition */
 } reactor;
 
 static __thread reactor reactor_core = {0};
@@ -89,8 +93,7 @@ void reactor_handler_destruct(reactor_handler *handler)
 static inline uint32_t to_poll_mask(uint32_t events)
 {
   /* Callers pass POLLIN/POLLOUT (descriptor.c) or the legacy
-   * DESCRIPTOR_READ/WRITE bits for direct callers. EPOLL* and POLL* share the
-   * same numeric values on Linux, so POLL* covers both. */
+   * DESCRIPTOR_READ/WRITE bit values for direct callers. */
   uint32_t mask = 0;
   if ((events & (POLLIN | DESCRIPTOR_READ)))
     mask |= POLLIN;
@@ -99,27 +102,37 @@ static inline uint32_t to_poll_mask(uint32_t events)
   return mask;
 }
 
-/* Find slot by fd (linear; descriptor counts are small and fd numbers dense
- * enough in practice; a direct fd->index map can be added if this shows up). */
-static reactor_poll_slot *reactor_slot_find(int fd)
+/* O(1) lookup by fd. */
+static inline reactor_poll_slot *reactor_slot_find(int fd)
 {
-  for (size_t i = 0; i < REACTOR_POLL_TABLE_SIZE; i++)
-    if (reactor_core.table[i].in_flight && reactor_core.table[i].fd == fd)
-      return &reactor_core.table[i];
+  if ((size_t) fd < REACTOR_MAX_FDS)
+    return reactor_core.fds[fd];
   return NULL;
 }
 
+/* Acquire a fresh slot from the pool (linear only on miss, amortized O(1)). */
 static reactor_poll_slot *reactor_slot_acquire(void)
 {
-  for (size_t i = 0; i < REACTOR_POLL_TABLE_SIZE; i++)
-    if (!reactor_core.table[i].in_flight)
-      return &reactor_core.table[i];
+  for (size_t i = reactor_core.next_free_slot; i < reactor_core.slot_count; i++)
+    if (!reactor_core.slots[i].handler)
+    {
+      reactor_core.next_free_slot = i + 1;
+      return &reactor_core.slots[i];
+    }
+  /* wrap */
+  for (size_t i = 0; i < reactor_core.next_free_slot; i++)
+    if (!reactor_core.slots[i].handler)
+    {
+      reactor_core.next_free_slot = i + 1;
+      return &reactor_core.slots[i];
+    }
   return NULL;
 }
 
-/* Submit a POLL_ADD SQE for a slot. The slot's handler is stored as
- * user_data; descriptor_callback recovers the poll result from the CQE. */
-static void reactor_poll_submit(reactor_poll_slot *slot)
+/* Submit a POLL_ADD SQE for a slot. The slot pointer is stored as user_data so
+ * the completion handler recovers the slot in O(1). fd is passed explicitly
+ * (the slot does not store it). */
+static void reactor_poll_submit_fd(reactor_poll_slot *slot, int fd)
 {
   struct io_uring_sqe *sqe = io_uring_get_sqe(&reactor_core.ring);
   if (reactor_unlikely(!sqe))
@@ -130,8 +143,8 @@ static void reactor_poll_submit(reactor_poll_slot *slot)
     if (!sqe)
       return;
   }
-  io_uring_prep_poll_add(sqe, slot->fd, slot->events);
-  io_uring_sqe_set_data(sqe, slot->handler);
+  io_uring_prep_poll_add(sqe, fd, slot->events);
+  io_uring_sqe_set_data(sqe, slot);
   slot->in_flight++;
 }
 
@@ -161,10 +174,15 @@ uint64_t reactor_now(void)
 
 void reactor_construct(void)
 {
-  memset(reactor_core.table, 0, sizeof reactor_core.table);
+  memset(reactor_core.fds, 0, sizeof reactor_core.fds);
   reactor_core.active = 1;
   reactor_core.descriptors = 0;
   reactor_core.time = 0;
+  reactor_core.next_free_slot = 0;
+  reactor_core.slot_count = REACTOR_RING_ENTRIES;   /* one slot per ring entry is plenty */
+  reactor_core.slots = calloc(reactor_core.slot_count, sizeof *reactor_core.slots);
+  if (!reactor_core.slots)
+    abort();
 
   if (io_uring_queue_init(REACTOR_RING_ENTRIES, &reactor_core.ring,
                           IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER) < 0)
@@ -188,24 +206,29 @@ void reactor_construct(void)
 void reactor_destruct(void)
 {
   io_uring_queue_exit(&reactor_core.ring);
+  free(reactor_core.slots);
+  reactor_core.slots = NULL;
 }
 
 void reactor_add(reactor_handler *handler, int fd, uint32_t events)
 {
+  if ((size_t) fd >= REACTOR_MAX_FDS)
+    return;
   reactor_poll_slot *slot = reactor_slot_acquire();
   if (reactor_unlikely(!slot))
     return;
   slot->handler = handler;
-  slot->fd = fd;
   slot->events = to_poll_mask(events);
   slot->in_flight = 0;
+  reactor_core.fds[fd] = slot;
   reactor_core.descriptors++;
-  reactor_poll_submit(slot);
+  reactor_poll_submit_fd(slot, fd);
   io_uring_submit(&reactor_core.ring);
 }
 
 void reactor_modify(reactor_handler *handler, int fd, uint32_t events)
 {
+  (void) handler;
   reactor_poll_slot *slot = reactor_slot_find(fd);
   if (!slot)
   {
@@ -218,10 +241,9 @@ void reactor_modify(reactor_handler *handler, int fd, uint32_t events)
     return;
   slot->events = new_mask;
   /* io_uring POLL_ADD is one-shot (per submission); outstanding polls will
-   * complete and we re-arm with the new mask. Mark so the completion handler
-   * knows to resubmit. */
+   * complete and we re-arm with the new mask. */
   if (slot->in_flight == 0)
-    reactor_poll_submit(slot);
+    reactor_poll_submit_fd(slot, fd);
 }
 
 void reactor_delete(reactor_handler *handler, int fd)
@@ -230,14 +252,15 @@ void reactor_delete(reactor_handler *handler, int fd)
   reactor_poll_slot *slot = reactor_slot_find(fd);
   if (!slot)
     return;
+  reactor_core.fds[fd] = NULL;
   /* Best-effort cancellation; completion handler drops the slot. */
   struct io_uring_sqe *sqe = io_uring_get_sqe(&reactor_core.ring);
   if (sqe)
   {
-    io_uring_prep_poll_remove(sqe, (uint64_t)(uintptr_t)slot->handler);
+    io_uring_prep_poll_remove(sqe, (uint64_t)(uintptr_t)slot);
     io_uring_sqe_set_data(sqe, NULL);
   }
-  slot->fd = -1;            /* sentinel: completion handler frees the slot */
+  slot->handler = NULL;       /* mark free; completion handler cleans in_flight */
   if (reactor_core.descriptors)
     reactor_core.descriptors--;
 }
@@ -267,17 +290,25 @@ int reactor_loop_once(void)
   io_uring_for_each_cqe(&reactor_core.ring, head, cqe)
   {
     count++;
-    reactor_handler *handler = (reactor_handler *) cqe->user_data;
+    reactor_poll_slot *slot = (reactor_poll_slot *) cqe->user_data;
 
     /* NULL user_data: internal cancellation op (e.g. poll_remove). */
-    if (!handler)
+    if (!slot)
+      continue;
+
+    /* Decrement in-flight regardless of outcome. */
+    if (slot->in_flight > 0)
+      slot->in_flight--;
+
+    /* If the slot was deleted (handler cleared), drop it; no dispatch. */
+    if (!slot->handler)
       continue;
 
     /* cqe->res holds either:
      *   - a poll mask (>=0) for POLL_ADD completions, or
      *   - a negative errno for cancellation/error.
-     * The descriptor layer decodes it via descriptor_callback. */
-    reactor_dispatch(handler, REACTOR_EPOLL_EVENT, (uintptr_t) cqe->res);
+     * The descriptor layer decodes it via descriptor_callback and re-arms. */
+    reactor_dispatch(slot->handler, REACTOR_EPOLL_EVENT, (uintptr_t) cqe->res);
 
     if (count >= REACTOR_CQE_BATCH)
       break;
@@ -343,8 +374,8 @@ struct io_uring *reactor_ring(void)
 void reactor_poll_resubmit(int fd)
 {
   reactor_poll_slot *slot = reactor_slot_find(fd);
-  if (slot)
-    reactor_poll_submit(slot);
+  if (slot && slot->handler)
+    reactor_poll_submit_fd(slot, fd);
 }
 
 void reactor_submit(void)
