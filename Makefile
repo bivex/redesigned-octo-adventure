@@ -50,7 +50,7 @@ ALL_OBJS = $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS) $(MAIN_OBJS)
 # Build targets
 .PHONY: all clean third_party
 
-all: third_party libreactor libreactor-server libreactor-binary-server binary-loadgen
+all: third_party libreactor libreactor-server libreactor-binary-server binary-loadgen binary-loadgen-uring
 
 # Build third_party libraries
 third_party:
@@ -98,6 +98,12 @@ libreactor-binary-server: $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS)
 binary-loadgen: bench/binary_loadgen.c
 	@echo "  [CC/LD] $@"
 	@$(CC) -O3 -Wall -pthread -o $@ $< -DHAVE_MSGPACK $(shell pkg-config --cflags --libs msgpack 2>/dev/null || echo "-lmsgpackc")
+	@echo "✓ Built: $@"
+
+# Binary protocol load generator (io_uring, pipelined — measures server ceiling)
+binary-loadgen-uring: bench/binary_loadgen_uring.c
+	@echo "  [CC/LD] $@"
+	@$(CC) -O3 -Wall -std=gnu2x -pthread -o $@ $< -DHAVE_MSGPACK -luring -lmsgpackc
 	@echo "✓ Built: $@"
 
 # Compilation rules with nice output
