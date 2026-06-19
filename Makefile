@@ -7,9 +7,9 @@ CC       = gcc
 # -fno-omit-frame-pointer: Better profiling support
 # -ffast-math: Floating-point optimizations
 # -funroll-loops: Loop unrolling
-CFLAGS   = -std=gnu2x -Wall -Wextra -Wpedantic -O3 -g -march=native -flto -fno-omit-frame-pointer -ffast-math -funroll-loops -MMD -MP
+CFLAGS   = -std=gnu2x -Wall -Wextra -Wpedantic -O3 -g -march=native -flto -fno-omit-frame-pointer -ffast-math -funroll-loops -MMD -MP -DHAVE_MSGPACK
 CPPFLAGS = -Isrc/include -Isrc/include/platform -Isrc/include/domain -Isrc/include/infrastructure -Ithird_party/libreactor/src -Ithird_party/libdynamic
-LDADD    = third_party/libreactor/.libs/libreactor.a third_party/libclo/.libs/libclo.a -lssl -lcrypto -ldl -luring
+LDADD    = third_party/libreactor/.libs/libreactor.a third_party/libclo/.libs/libclo.a -lssl -lcrypto -ldl -luring -lmsgpackc
 
 # Build directory
 BUILD_DIR = build
@@ -27,11 +27,16 @@ DOMAIN_SRCS = \
 	src/domain/http_server.c
 
 INFRASTRUCTURE_SRCS = \
-	src/infrastructure/server_infrastructure.c
+	src/infrastructure/server_infrastructure.c \
+	src/infrastructure/binary_server.c
 
 MAIN_SRCS = \
 	src/main/libreactor.c \
 	src/main/libreactor-server.c
+
+# binary protocol server (isolated from HTTP path)
+BINARY_MAIN_SRC = src/main/libreactor-binary-server.c
+BINARY_MAIN_OBJ = $(BINARY_MAIN_SRC:src/%.c=$(BUILD_DIR)/%.o)
 
 # Object files (in build directory)
 PLATFORM_OBJS = $(PLATFORM_SRCS:src/%.c=$(BUILD_DIR)/%.o)
@@ -45,7 +50,7 @@ ALL_OBJS = $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS) $(MAIN_OBJS)
 # Build targets
 .PHONY: all clean third_party
 
-all: third_party libreactor libreactor-server
+all: third_party libreactor libreactor-server libreactor-binary-server binary-loadgen
 
 # Build third_party libraries
 third_party:
@@ -82,6 +87,17 @@ libreactor: $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS) $(BUILD_DIR)/
 libreactor-server: $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS) $(BUILD_DIR)/main/libreactor-server.o
 	@echo "  [LD]  $@"
 	@$(CC) -o $@ $^ $(LDADD)
+	@echo "✓ Built: $@"
+
+libreactor-binary-server: $(PLATFORM_OBJS) $(DOMAIN_OBJS) $(INFRASTRUCTURE_OBJS) $(BINARY_MAIN_OBJ)
+	@echo "  [LD]  $@"
+	@$(CC) -o $@ $^ $(LDADD)
+	@echo "✓ Built: $@"
+
+# Binary protocol load generator (standalone pthread TCP client)
+binary-loadgen: bench/binary_loadgen.c
+	@echo "  [CC/LD] $@"
+	@$(CC) -O3 -Wall -pthread -o $@ $< -DHAVE_MSGPACK $(shell pkg-config --cflags --libs msgpack 2>/dev/null || echo "-lmsgpackc")
 	@echo "✓ Built: $@"
 
 # Compilation rules with nice output
